@@ -517,9 +517,14 @@ with r1c1:
 
 with r1c2:
     st.markdown("<div class='sub-header'>📊 GİŞE DAĞILIMI (Log Ölçek)</div>", unsafe_allow_html=True)
-    fig2 = px.histogram(df, x='revenue', nbins=50, color_discrete_sequence=['#00f3ff'],
-                        log_x=True, labels={'revenue':'Gişe ($)'})
+    df_log = df[df['revenue'] > 0].copy()
+    df_log['log_revenue'] = np.log10(df_log['revenue'])
+    fig2 = px.histogram(df_log, x='log_revenue', nbins=50, color_discrete_sequence=['#00f3ff'],
+                        labels={'log_revenue':'Gişe (log₁₀ $)'})
     fig2.update_traces(marker_line_width=0, opacity=0.8)
+    tickvals = [4, 5, 6, 7, 8, 9, 10]
+    ticktext = ['$10K', '$100K', '$1M', '$10M', '$100M', '$1B', '$10B']
+    fig2.update_xaxes(tickvals=tickvals, ticktext=ticktext)
     apply_dark(fig2, 400)
     st.plotly_chart(fig2, use_container_width=True)
 
