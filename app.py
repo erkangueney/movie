@@ -397,21 +397,37 @@ def load_data():
 
     df['roi']            = df['revenue'] / df['budget']
     df['profit']         = df['revenue'] - df['budget']
-    df['success_class']  = df['roi'].apply(lambda x: 2 if x > 3 else (1 if x > 1.5 else 0))
+    # Daha gerçekçi eşikler: ROI > 2 = Hit, ROI > 1 = Orta, geri kalan = Başarısız
+    df['success_class']  = df['roi'].apply(lambda x: 2 if x > 2 else (1 if x > 1 else 0))
     df['decade']         = (pd.to_datetime(df['release_date'], errors='coerce').dt.year // 10 * 10).astype('Int64').astype(str) + 's'
+
+    # ── Gelişmiş feature engineering ──
+    df['genre_count'] = df['genres_list'].apply(len)
+    # Yönetmen ortalama ROI
+    dir_roi = df[df['roi'].between(0, 1000)].groupby('director')['roi'].mean()
+    df['director_avg_roi'] = df['director'].map(dir_roi).fillna(dir_roi.median())
+    # Oyuncu gişe gücü (ilk 5 oyuncunun ortalama gişesi)
+    cast_rev = df.explode('cast_list').groupby('cast_list')['revenue'].mean()
+    df['cast_power'] = df['cast_list'].apply(
+        lambda cl: np.mean([cast_rev.get(c, 0) for c in cl]) if cl else 0
+    )
 
     return df
 
 df = load_data()
 
 # ─────────────────────────────────────────────
-# 4. MODEL TRAINING
+# 4. MODEL TRAINING (Geliştirilmiş — 8 Feature)
 # ─────────────────────────────────────────────
+FEATURE_COLS = ['budget', 'runtime', 'popularity', 'vote_count',
+                'vote_average', 'genre_count', 'director_avg_roi', 'cast_power']
+
 @st.cache_resource
 def train_models(data):
-    X   = data[['budget', 'runtime', 'popularity', 'vote_count']].fillna(0)
-    reg = GradientBoostingRegressor(n_estimators=150, learning_rate=0.1, random_state=42).fit(X, data['revenue'])
-    clf = RandomForestClassifier(n_estimators=150, random_state=42).fit(X, data['success_class'])
+    X   = data[FEATURE_COLS].fillna(0)
+    reg = GradientBoostingRegressor(n_estimators=250, learning_rate=0.08,
+                                    max_depth=5, subsample=0.8, random_state=42).fit(X, data['revenue'])
+    clf = RandomForestClassifier(n_estimators=250, max_depth=8, random_state=42).fit(X, data['success_class'])
     return reg, clf
 
 reg_mod, clf_mod = train_models(df)
@@ -1021,12 +1037,45 @@ with pred_c1:
     u_runtime = st.slider("⏱️ Film Süresi (Dakika)", 60, 220, 115)
     u_pop     = st.slider("🔥 Hedef Popülarite Skoru", 0, 500, 80)
     u_vote    = st.number_input("🗳️ Beklenen Oy Sayısı", min_value=100, max_value=20000, value=2000, step=100)
+    u_score   = st.slider("⭐ Beklenen IMDB Puanı", 1.0, 10.0, 7.0, 0.1)
+
+    # Tür seçimi
+    all_genres = sorted(df.explode('genres_list')['genres_list'].dropna().unique().tolist())
+    u_genres  = st.multiselect("🎭 Film Türü (birden fazla seçilebilir)", all_genres, default=['Action', 'Adventure'])
+
+    # Yönetmen seçimi
+    top_directors = df.groupby('director').agg(film_count=('title','count'), avg_roi=('roi','mean')).reset_index()
+    top_directors = top_directors[top_directors['film_count'] >= 2].nlargest(200, 'film_count')['director'].tolist()
+    u_director = st.selectbox("🎬 Yönetmen", ['Bilinmiyor'] + top_directors)
+
+    # Başrol oyuncusu seçimi
+    top_actors = df.explode('cast_list').groupby('cast_list').agg(film_count=('title','count'), avg_rev=('revenue','mean')).reset_index()
+    top_actors = top_actors[top_actors['film_count'] >= 3].nlargest(200, 'avg_rev')['cast_list'].tolist()
+    u_actor = st.selectbox("🌟 Başrol Oyuncusu", ['Bilinmiyor'] + top_actors)
     
     predict_btn = st.button("🚀 ANALİZİ BAŞLAT")
 
 with pred_c2:
     if predict_btn:
-        X_input    = [[u_budget, u_runtime, u_pop, u_vote]]
+        # Gerçek feature değerlerini hesapla
+        u_genre_count = len(u_genres) if u_genres else 2
+
+        # Yönetmen ROI
+        if u_director != 'Bilinmiyor':
+            dir_data = df[df['director'] == u_director]
+            u_dir_roi = dir_data['roi'].mean() if len(dir_data) > 0 else df['director_avg_roi'].median()
+        else:
+            u_dir_roi = df['director_avg_roi'].median()
+
+        # Oyuncu gişe gücü
+        if u_actor != 'Bilinmiyor':
+            cast_rev_map = df.explode('cast_list').groupby('cast_list')['revenue'].mean()
+            u_cast_power = cast_rev_map.get(u_actor, df['cast_power'].median())
+        else:
+            u_cast_power = df['cast_power'].median()
+
+        X_input    = [[u_budget, u_runtime, u_pop, u_vote,
+                       u_score, u_genre_count, u_dir_roi, u_cast_power]]
         rev_pred   = reg_mod.predict(X_input)[0]
         proba      = clf_mod.predict_proba(X_input)[0]
         prob_hit   = proba[2] * 100
@@ -1035,7 +1084,13 @@ with pred_c2:
         roi_pred   = rev_pred / u_budget
         profit_pred = rev_pred - u_budget
 
-        success_label = "🟢 HİT" if prob_hit > 50 else ("🟡 ORTA" if prob_mid > prob_fail else "🔴 RİSKLİ")
+        # ROI bazlı akıllı sınıflandırma — kârlı film asla 'Riskli' olamaz
+        if roi_pred >= 2.0 or prob_hit > 35:
+            success_label = "🟢 HİT"
+        elif roi_pred >= 1.0 or prob_mid > prob_fail:
+            success_label = "🟡 ORTA"
+        else:
+            success_label = "🔴 RİSKLİ"
         
         st.markdown(f"""
         <div class="pred-result">
@@ -1066,10 +1121,12 @@ with pred_c2:
         # Feature importance viz
         st.markdown("<div class='neon-divider'></div>", unsafe_allow_html=True)
         st.markdown("<div class='sub-header'>🧠 MODEL FAKTÖR AĞIRLIKLARI</div>", unsafe_allow_html=True)
-        feat_names = ['Bütçe', 'Süre', 'Popülarite', 'Oy Sayısı']
+        feat_names = ['Bütçe', 'Süre', 'Popülarite', 'Oy Sayısı',
+                      'Puan', 'Tür Sayısı', 'Yönetmen ROI', 'Oyuncu Gücü']
         importances = reg_mod.feature_importances_
         max_imp = importances.max()
-        colors_feat = ['#00f3ff','#ff8800','#ffd700','#00ff88']
+        colors_feat = ['#00f3ff','#ff8800','#ffd700','#00ff88',
+                       '#ff6bff','#88ddff','#ff4444','#44ff44']
         html_feat = ""
         for i, (fn, imp) in enumerate(zip(feat_names, importances)):
             pct = imp / max_imp * 100
@@ -1169,17 +1226,64 @@ if search_btn and search_query:
                 if overview:
                     st.markdown(f"<p style='opacity:0.7;font-size:13px;line-height:1.6'>{overview[:400]}{'...' if len(overview)>400 else ''}</p>", unsafe_allow_html=True)
                 
-                # AI model prediction on this movie
+                # AI model prediction on this movie (geliştirilmiş — yönetmen, oyuncu, tür verileri ile)
                 if budget_live > 0:
-                    rev_ai   = reg_mod.predict([[budget_live, runtime_live, pop_live, vote_cnt_live]])[0]
-                    proba_ai = clf_mod.predict_proba([[budget_live, runtime_live, pop_live, vote_cnt_live]])[0]
+                    # Dataset'ten yönetmen ROI ortalamasını bul
+                    dir_name = directors_live[0] if directors_live else 'Unknown'
+                    dir_data_live = df[df['director'] == dir_name]
+                    dir_roi_val = dir_data_live['roi'].mean() if len(dir_data_live) > 0 else df['director_avg_roi'].median()
+                    if np.isnan(dir_roi_val) or dir_roi_val <= 0:
+                        dir_roi_val = df['director_avg_roi'].median()
+
+                    # Dataset'ten oyuncu gişe gücünü hesapla
+                    cast_rev_lookup = df.explode('cast_list').groupby('cast_list')['revenue'].mean()
+                    cast_pwr = np.mean([cast_rev_lookup.get(c, 0) for c in cast_live]) if cast_live else df['cast_power'].median()
+                    if cast_pwr == 0:
+                        cast_pwr = df['cast_power'].median()
+                    genre_cnt_live = len(genres_live)
+
+                    # Tür bazlı gişe başarı oranı
+                    genre_hit_rates = {}
+                    for g in genres_live:
+                        g_data = df[df['genres_list'].apply(lambda gl: g in gl)]
+                        if len(g_data) > 0:
+                            genre_hit_rates[g] = (g_data['success_class'] == 2).mean()
+                    avg_genre_hit = np.mean(list(genre_hit_rates.values())) if genre_hit_rates else 0.3
+
+                    X_live = [[budget_live, runtime_live, pop_live, vote_cnt_live,
+                               score_live, genre_cnt_live, dir_roi_val, cast_pwr]]
+                    rev_ai   = reg_mod.predict(X_live)[0]
+                    proba_ai = clf_mod.predict_proba(X_live)[0]
                     roi_ai   = rev_ai / budget_live
-                    
-                    success_ai = "🟢 HİT" if proba_ai[2] > 0.5 else ("🟡 ORTA" if proba_ai[1] > proba_ai[0] else "🔴 RİSKLİ")
+
+                    # Kompozit başarı skoru: Model + Yönetmen ROI + Oyuncu gücü + Tür başarısı
+                    model_score = proba_ai[2]  # Hit olasılığı (0-1)
+                    dir_score = min(1.0, dir_roi_val / 5.0)  # Yönetmen ROI 5x = maks
+                    cast_score = min(1.0, cast_pwr / df['cast_power'].quantile(0.8)) if df['cast_power'].quantile(0.8) > 0 else 0.5
+                    genre_score = avg_genre_hit
+
+                    composite = (model_score * 0.35 + dir_score * 0.25 +
+                                 cast_score * 0.25 + genre_score * 0.15)
+
+                    # ROI bazlı akıllı sınıflandırma
+                    if roi_ai >= 2.0 or composite >= 0.45:
+                        success_ai = "🟢 HİT"
+                    elif roi_ai >= 1.0 or composite >= 0.30:
+                        success_ai = "🟡 ORTA"
+                    else:
+                        success_ai = "🔴 RİSKLİ"
+
+                    # Gerçek gişe verisi varsa, gerçeği referans al
+                    if revenue_live > 0:
+                        real_roi = revenue_live / budget_live
+                        if real_roi >= 2.0:
+                            success_ai = "🟢 HİT"
+                        elif real_roi >= 1.0:
+                            success_ai = "🟡 ORTA"
                     
                     st.markdown(f"""
                     <div style='background:rgba(0,243,255,0.07);border:1px solid rgba(0,243,255,0.3);border-radius:12px;padding:16px;margin-top:12px'>
-                      <div style='font-size:11px;letter-spacing:2px;opacity:0.6;margin-bottom:8px'>🤖 AI MODEL TAHMİNİ</div>
+                      <div style='font-size:11px;letter-spacing:2px;opacity:0.6;margin-bottom:8px'>🤖 AI MODEL TAHMİNİ (Yönetmen + Oyuncu + Tür Analizi)</div>
                       <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:8px'>
                         <div style='text-align:center'>
                           <div style='color:#00f3ff;font-size:16px;font-weight:900'>${rev_ai/1e6:.0f}M</div>
@@ -1190,12 +1294,30 @@ if search_btn and search_query:
                           <div style='font-size:10px;opacity:0.5'>TAHMİNİ ROI</div>
                         </div>
                         <div style='text-align:center'>
-                          <div style='color:#00ff88;font-size:16px;font-weight:900'>{proba_ai[2]*100:.0f}%</div>
-                          <div style='font-size:10px;opacity:0.5'>HİT ŞANSI</div>
+                          <div style='color:#00ff88;font-size:16px;font-weight:900'>{composite*100:.0f}%</div>
+                          <div style='font-size:10px;opacity:0.5'>BAŞARI SKORU</div>
                         </div>
                         <div style='text-align:center'>
                           <div style='font-size:16px;font-weight:900'>{success_ai}</div>
                           <div style='font-size:10px;opacity:0.5'>SONUÇ</div>
+                        </div>
+                      </div>
+                      <div style='margin-top:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:6px;font-size:10px'>
+                        <div style='text-align:center;background:rgba(0,0,0,0.2);border-radius:6px;padding:6px'>
+                          <div style='opacity:0.5'>Model</div>
+                          <div style='color:#00f3ff'>{model_score*100:.0f}%</div>
+                        </div>
+                        <div style='text-align:center;background:rgba(0,0,0,0.2);border-radius:6px;padding:6px'>
+                          <div style='opacity:0.5'>Yönetmen</div>
+                          <div style='color:#ffd700'>{dir_score*100:.0f}%</div>
+                        </div>
+                        <div style='text-align:center;background:rgba(0,0,0,0.2);border-radius:6px;padding:6px'>
+                          <div style='opacity:0.5'>Oyuncu</div>
+                          <div style='color:#ff8800'>{cast_score*100:.0f}%</div>
+                        </div>
+                        <div style='text-align:center;background:rgba(0,0,0,0.2);border-radius:6px;padding:6px'>
+                          <div style='opacity:0.5'>Tür</div>
+                          <div style='color:#00ff88'>{genre_score*100:.0f}%</div>
                         </div>
                       </div>
                     </div>
@@ -1212,7 +1334,210 @@ if search_btn and search_query:
                         </div>
                         """, unsafe_allow_html=True)
                 else:
-                    st.info("Bu film için bütçe verisi TMDB'de mevcut değil. Tahmin bütçe bilgisi gerektirir.")
+                    # ── Bütçe/gişe YOK → Yönetmen + Oyuncu + Tür + YouTube bazlı akıllı tahmin ──────
+                    st.markdown(
+                        "<div style='background:rgba(255,136,0,0.07);border:1px solid rgba(255,136,0,0.3);"
+                        "border-radius:10px;padding:10px 14px;margin-top:8px;font-size:11px;opacity:0.8'>"
+                        "⚠️ TMDB'de bütçe/gişe verisi bulunamadı. "
+                        "Yönetmen, oyuncu, tür başarı geçmişi ve YouTube trailer verileri kullanılarak tahmini projeksiyon hesaplanıyor..."
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                    YT_KEY  = "AIzaSyDLrfwX38PZWjEVtjzu-i7AM7sfWfVBj9k"
+                    YT_BASE = "https://www.googleapis.com/youtube/v3"
+
+                    # ── 1. Yönetmen Analizi ──
+                    dir_name_est = directors_live[0] if directors_live else 'Unknown'
+                    dir_data_est = df[df['director'] == dir_name_est]
+                    if len(dir_data_est) > 0:
+                        dir_roi_est = dir_data_est['roi'].mean()
+                        dir_film_count = len(dir_data_est)
+                    else:
+                        dir_roi_est = df['director_avg_roi'].median()
+                        dir_film_count = 0
+                    if np.isnan(dir_roi_est) or dir_roi_est <= 0:
+                        dir_roi_est = df['director_avg_roi'].median()
+
+                    # ── 2. Oyuncu Analizi ──
+                    cast_rev_est_df = df.explode('cast_list').groupby('cast_list').agg(
+                        avg_rev=('revenue', 'mean'),
+                        hit_rate=('success_class', lambda x: (x == 2).mean()),
+                        film_count=('title', 'count')
+                    )
+                    cast_scores_list = []
+                    cast_details_list = []
+                    for c in cast_live:
+                        if c in cast_rev_est_df.index:
+                            cdata = cast_rev_est_df.loc[c]
+                            cast_scores_list.append(cdata['avg_rev'])
+                            cast_details_list.append(c)
+                    cast_pwr_est = np.mean(cast_scores_list) if cast_scores_list else df['cast_power'].median()
+                    if cast_pwr_est == 0:
+                        cast_pwr_est = df['cast_power'].median()
+
+                    # ── 3. Tür Analizi ──
+                    genre_cnt_est = len(genres_live)
+                    genre_hit_rates_map = {}
+                    for g in genres_live:
+                        g_data = df[df['genres_list'].apply(lambda gl: g in gl)]
+                        if len(g_data) > 0:
+                            genre_hit_rates_map[g] = (g_data['success_class'] == 2).mean()
+                    avg_genre_hit_est = np.mean(list(genre_hit_rates_map.values())) if genre_hit_rates_map else 0.3
+
+                    # ── 4. YouTube Trailer Analizi ──
+                    with st.spinner("📺 YouTube trailer + Dataset analizi yapılıyor..."):
+                        yt_views, yt_likes, yt_sentiment = 0, 0, 0.5
+                        try:
+                            sr = requests.get(
+                                f"{YT_BASE}/search",
+                                params={"part": "snippet",
+                                        "q": f"{movie.get('title', '')} official trailer",
+                                        "type": "video", "maxResults": 1, "key": YT_KEY},
+                                timeout=6,
+                            ).json()
+                            yt_items = sr.get("items", [])
+                            if yt_items:
+                                vid_id = yt_items[0]["id"]["videoId"]
+                                vr = requests.get(
+                                    f"{YT_BASE}/videos",
+                                    params={"part": "statistics", "id": vid_id, "key": YT_KEY},
+                                    timeout=6,
+                                ).json()
+                                vstats = vr["items"][0]["statistics"]
+                                yt_views     = int(vstats.get("viewCount", 0))
+                                yt_likes     = int(vstats.get("likeCount", 0))
+                                yt_sentiment = round(min(1.0, (yt_likes / max(yt_views, 1)) * 20), 3)
+                        except Exception:
+                            pass
+
+                    # ── 5. Model Tahmini ──
+                    genre_budget_map = {
+                        "Action": 180e6, "Adventure": 150e6, "Animation": 120e6,
+                        "Comedy":  60e6, "Drama":      40e6, "Horror":     25e6,
+                        "Science Fiction": 140e6, "Thriller": 55e6,
+                        "Romance": 35e6, "Fantasy": 120e6, "Crime": 50e6,
+                    }
+                    genre_mult_map = {
+                        "Action": 1.25, "Adventure": 1.20, "Animation": 1.15,
+                        "Comedy": 1.00, "Drama":     0.85, "Horror":    0.95,
+                        "Science Fiction": 1.20, "Thriller": 1.00,
+                        "Romance": 0.80, "Fantasy": 1.10, "Crime": 0.95,
+                    }
+                    first_genre  = genres_live[0] if genres_live else "Drama"
+                    est_budget   = genre_budget_map.get(first_genre, 70e6)
+                    genre_mult   = genre_mult_map.get(first_genre, 1.0)
+                    trailer_bonus = (yt_views / 1_000_000) * 2_000_000
+
+                    X_est     = [[est_budget, runtime_live, pop_live, vote_cnt_live,
+                                  score_live, genre_cnt_est, dir_roi_est, cast_pwr_est]]
+                    rev_est   = reg_mod.predict(X_est)[0] * genre_mult + trailer_bonus
+                    proba_est = clf_mod.predict_proba(X_est)[0]
+                    roi_est   = rev_est / est_budget
+                    conf_low  = rev_est * 0.75
+                    conf_high = rev_est * 1.30
+
+                    # ── KOMPOZİT BAŞARI SKORU (5 Faktör) ──
+                    model_sc = proba_est[2] if len(proba_est) == 3 else 0.33
+                    dir_sc   = min(1.0, dir_roi_est / 5.0)
+                    cast_sc  = min(1.0, cast_pwr_est / df['cast_power'].quantile(0.8)) if df['cast_power'].quantile(0.8) > 0 else 0.5
+                    genre_sc = avg_genre_hit_est
+                    yt_sc    = min(1.0, yt_sentiment + (yt_views / 50_000_000))
+
+                    composite_est = (dir_sc * 0.25 + cast_sc * 0.25 +
+                                     genre_sc * 0.20 + model_sc * 0.15 + yt_sc * 0.15)
+
+                    if roi_est >= 2.0 or composite_est >= 0.50:
+                        verdict = "🟢 HİT POTANSİYELİ"
+                    elif roi_est >= 1.0 or composite_est >= 0.35:
+                        verdict = "🟡 ORTA BANT"
+                    else:
+                        verdict = "🔴 RİSKLİ"
+                    yt_views_m = yt_views / 1_000_000
+
+                    st.markdown(f"""
+                    <div style='background:rgba(255,136,0,0.06);border:1px solid rgba(255,136,0,0.25);
+                    border-radius:14px;padding:18px;margin-top:12px'>
+                      <div style='font-size:11px;letter-spacing:2px;opacity:0.5;margin-bottom:10px'>
+                        🤖 TAHMİNİ PROJEKSİYON — Yönetmen + Oyuncu + Tür + Trailer Analizi
+                      </div>
+                      <div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px'>
+                        <div style='background:rgba(0,0,0,0.25);border-radius:10px;padding:12px;text-align:center'>
+                          <div style='color:#00f3ff;font-size:22px;font-weight:900'>${rev_est/1e6:.0f}M</div>
+                          <div style='font-size:10px;opacity:0.5;margin-top:2px'>TAHMİNİ GİŞE</div>
+                          <div style='font-size:10px;opacity:0.35;margin-top:4px'>
+                            ${conf_low/1e6:.0f}M – ${conf_high/1e6:.0f}M aralığı
+                          </div>
+                        </div>
+                        <div style='background:rgba(0,0,0,0.25);border-radius:10px;padding:12px;text-align:center'>
+                          <div style='color:#ff8800;font-size:22px;font-weight:900'>x{roi_est:.1f}</div>
+                          <div style='font-size:10px;opacity:0.5;margin-top:2px'>TAHMİNİ ROI</div>
+                          <div style='font-size:10px;opacity:0.35;margin-top:4px'>
+                            Est. bütçe: ${est_budget/1e6:.0f}M ({first_genre})
+                          </div>
+                        </div>
+                      </div>
+                      <div style='text-align:center;margin-bottom:14px'>
+                        <div style='font-size:22px;font-weight:900'>{verdict}</div>
+                        <div style='color:#00f3ff;font-size:14px;font-weight:700;margin-top:4px'>Kompozit Başarı Skoru: {composite_est*100:.0f}%</div>
+                      </div>
+                      <div style='display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:14px'>
+                        <div style='background:rgba(255,215,0,0.1);border:1px solid rgba(255,215,0,0.3);
+                        border-radius:8px;padding:8px;text-align:center'>
+                          <div style='font-size:10px;opacity:0.5'>🎬 Yönetmen</div>
+                          <div style='color:#ffd700;font-size:14px;font-weight:900'>{dir_sc*100:.0f}%</div>
+                          <div style='font-size:9px;opacity:0.3'>{dir_name_est[:15]}</div>
+                        </div>
+                        <div style='background:rgba(255,136,0,0.1);border:1px solid rgba(255,136,0,0.3);
+                        border-radius:8px;padding:8px;text-align:center'>
+                          <div style='font-size:10px;opacity:0.5'>🌟 Oyuncu</div>
+                          <div style='color:#ff8800;font-size:14px;font-weight:900'>{cast_sc*100:.0f}%</div>
+                          <div style='font-size:9px;opacity:0.3'>{len(cast_details_list)} tanınmış</div>
+                        </div>
+                        <div style='background:rgba(0,255,136,0.1);border:1px solid rgba(0,255,136,0.3);
+                        border-radius:8px;padding:8px;text-align:center'>
+                          <div style='font-size:10px;opacity:0.5'>🎭 Tür</div>
+                          <div style='color:#00ff88;font-size:14px;font-weight:900'>{genre_sc*100:.0f}%</div>
+                          <div style='font-size:9px;opacity:0.3'>{first_genre}</div>
+                        </div>
+                        <div style='background:rgba(0,243,255,0.1);border:1px solid rgba(0,243,255,0.3);
+                        border-radius:8px;padding:8px;text-align:center'>
+                          <div style='font-size:10px;opacity:0.5'>🤖 Model</div>
+                          <div style='color:#00f3ff;font-size:14px;font-weight:900'>{model_sc*100:.0f}%</div>
+                          <div style='font-size:9px;opacity:0.3'>ML Tahmin</div>
+                        </div>
+                        <div style='background:rgba(255,68,68,0.1);border:1px solid rgba(255,68,68,0.3);
+                        border-radius:8px;padding:8px;text-align:center'>
+                          <div style='font-size:10px;opacity:0.5'>📺 Trailer</div>
+                          <div style='color:#ff4444;font-size:14px;font-weight:900'>{yt_sc*100:.0f}%</div>
+                          <div style='font-size:9px;opacity:0.3'>{yt_views_m:.1f}M izlenme</div>
+                        </div>
+                      </div>
+                      <div style='background:rgba(0,0,0,0.15);border-radius:10px;padding:12px'>
+                        <div style='font-size:10px;letter-spacing:2px;opacity:0.4;margin-bottom:8px'>
+                          📊 DETAYLI ANALİZ
+                        </div>
+                        <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:6px;text-align:center'>
+                          <div>
+                            <div style='color:#ffd700;font-size:13px;font-weight:700'>x{dir_roi_est:.1f} ROI</div>
+                            <div style='font-size:10px;opacity:0.4'>Yönetmen Ort. ROI</div>
+                          </div>
+                          <div>
+                            <div style='color:#ff8800;font-size:13px;font-weight:700'>${cast_pwr_est/1e6:.0f}M</div>
+                            <div style='font-size:10px;opacity:0.4'>Oyuncu Ort. Gişe</div>
+                          </div>
+                          <div>
+                            <div style='color:#00ff88;font-size:13px;font-weight:700'>{avg_genre_hit_est*100:.0f}%</div>
+                            <div style='font-size:10px;opacity:0.4'>Tür Hit Oranı</div>
+                          </div>
+                        </div>
+                      </div>
+                      <div style='margin-top:10px;font-size:10px;opacity:0.3;text-align:center'>
+                        * Yönetmen geçmişi (%25) + Oyuncu gişe gücü (%25) + Tür başarı oranı (%20) + ML Model (%15) + YouTube trailer (%15)
+                      </div>
+                    </div>""", unsafe_allow_html=True)
+
+
         else:
             st.warning("Film bulunamadı. Farklı bir arama deneyin.")
     except Exception as e:
@@ -1243,23 +1568,49 @@ with mw_c2:
 
 if st.button("✨ SİHİRLİ ÖNERME BAŞLAT"):
     filtered = df.copy()
-    
-    if mood_genre != 'Hepsi':
-        filtered = filtered[filtered['genres_list'].apply(lambda x: mood_genre in x)]
-    if mood_decade != 'Hepsi':
-        filtered = filtered[filtered['decade'] == mood_decade]
-    if mood_success == 'Hit Filmler (ROI>3)':
-        filtered = filtered[filtered['success_class'] == 2]
-    elif mood_success == 'Orta Bütçe Hikayeleri':
-        filtered = filtered[(filtered['budget'] < 30_000_000) & (filtered['vote_average'] >= mood_min_score)]
-    
-    filtered = filtered[filtered['vote_average'] >= mood_min_score]
-    
-    sort_col_mood = {'Popülarite':'popularity','Puan':'vote_average','Gişe':'revenue','ROI':'roi'}[mood_sort]
-    filtered = filtered.nlargest(100, sort_col_mood)
+
+    # Ruh hali/mood girilmişse → parametreleri DEVRE DIŞI BIRAK, AI ile arama yap
+    if user_mood and user_mood.strip():
+        # Mood anahtar kelimelerini türlere eşle
+        mood_genre_map = {
+            'aksiyon': 'Action', 'action': 'Action', 'savaş': 'Action',
+            'komedi': 'Comedy', 'güldürü': 'Comedy', 'eğlenceli': 'Comedy', 'funny': 'Comedy',
+            'korku': 'Horror', 'gerilim': 'Thriller', 'thriller': 'Thriller',
+            'dram': 'Drama', 'drama': 'Drama', 'duygusal': 'Drama', 'ağlatıcı': 'Drama',
+            'romantik': 'Romance', 'romantic': 'Romance', 'aşk': 'Romance',
+            'bilim kurgu': 'Science Fiction', 'sci-fi': 'Science Fiction', 'uzay': 'Science Fiction',
+            'animasyon': 'Animation', 'çizgi film': 'Animation',
+            'macera': 'Adventure', 'adventure': 'Adventure', 'sürükleyici': 'Adventure',
+            'fantastik': 'Fantasy', 'fantasy': 'Fantasy',
+            'suç': 'Crime', 'polisiye': 'Crime', 'dedektif': 'Crime',
+        }
+        mood_lower = user_mood.lower()
+        detected_genres = [v for k, v in mood_genre_map.items() if k in mood_lower]
+        detected_genres = list(set(detected_genres))
+
+        if detected_genres:
+            filtered = filtered[filtered['genres_list'].apply(
+                lambda gl: any(g in gl for g in detected_genres)
+            )]
+        # Mood modunda minimum puan 5.0 (daha geniş sonuç)
+        filtered = filtered[filtered['vote_average'] >= 5.0]
+        filtered = filtered.nlargest(150, 'popularity')
+    else:
+        # Mood girilmemişse → standart filtreler uygula
+        if mood_genre != 'Hepsi':
+            filtered = filtered[filtered['genres_list'].apply(lambda x: mood_genre in x)]
+        if mood_decade != 'Hepsi':
+            filtered = filtered[filtered['decade'] == mood_decade]
+        if mood_success == 'Hit Filmler (ROI>3)':
+            filtered = filtered[filtered['success_class'] == 2]
+        elif mood_success == 'Orta Bütçe Hikayeleri':
+            filtered = filtered[(filtered['budget'] < 30_000_000) & (filtered['vote_average'] >= mood_min_score)]
+        filtered = filtered[filtered['vote_average'] >= mood_min_score]
+        sort_col_mood = {'Popülarite':'popularity','Puan':'vote_average','Gişe':'revenue','ROI':'roi'}[mood_sort]
+        filtered = filtered.nlargest(100, sort_col_mood)
     
     if len(filtered) == 0:
-        st.warning("Bu filtrelere uygun film bulunamadı. Filtreleri gevşetin.")
+        st.warning("Bu filtrelere uygun film bulunamadı. Filtreleri gevşetin veya farklı bir ruh hali deneyin.")
     else:
         recs = filtered.sample(min(8, len(filtered)))
         st.markdown("<div class='sub-header' style='margin-top:20px'>🎬 SENIN İÇİN AI SEÇİMLERİ</div>", unsafe_allow_html=True)
