@@ -4,7 +4,7 @@ pandas
 numpy
 scikit-learn
 plotly
-<<<<<<< HEAD
+xgboost
 statsmodels
 requests
 
@@ -16,7 +16,3 @@ langchain-core
 fastapi
 uvicorn[standard]
 pydantic
-=======
-xgboost
-statsmodels
->>>>>>> 032531a7488ec4a2972bf817a466cd83dd252402
