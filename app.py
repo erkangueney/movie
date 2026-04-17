@@ -1448,8 +1448,8 @@ detail_res = requests.get(
                 timeout=8
             ).json()
             
-            budget_live   = detail_res.get('budget', 0)
-            revenue_live  = detail_res.get('revenue', 0)
+budget_live   = detail_res.get('budget', 0)
+revenue_live  = detail_res.get('revenue', 0)
             runtime_live  = detail_res.get('runtime', 100) or 100
             pop_live      = movie.get('popularity', 50)
             score_live    = movie.get('vote_average', 0)
