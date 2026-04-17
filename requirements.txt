@@ -1,7 +1,17 @@
+# Core
 streamlit
 pandas
 numpy
 scikit-learn
 plotly
-xgboost
 statsmodels
+requests
+
+# Agentic Framework
+langgraph
+langchain-core
+
+# API
+fastapi
+uvicorn[standard]
+pydantic

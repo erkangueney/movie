@@ -1,0 +1,51 @@
+version: "3.9"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml — Movie Matrix AI Pro
+#
+# Servisleri başlat:   docker-compose up
+# Arka planda başlat:  docker-compose up -d
+# Durdur:              docker-compose down
+#
+# Streamlit : http://localhost:8501
+# FastAPI   : http://localhost:8000
+# API Docs  : http://localhost:8000/docs
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Streamlit UI ──────────────────────────────────────────────────────────
+  streamlit:
+    build: .
+    container_name: movie_matrix_streamlit
+    ports:
+      - "8501:8501"
+    volumes:
+      # Veri setlerini host'tan bağla (container'a kopyalamak zorunda kalmaz)
+      - ./tmdb_5000_movies.csv:/app/tmdb_5000_movies.csv:ro
+      - ./tmdb_5000_credits.csv:/app/tmdb_5000_credits.csv:ro
+      - ./system_prompt.md:/app/system_prompt.md:ro
+      - ./agents:/app/agents:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── FastAPI Servis ─────────────────────────────────────────────────────────
+  api:
+    build: .
+    container_name: movie_matrix_api
+    command: uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./tmdb_5000_movies.csv:/app/tmdb_5000_movies.csv:ro
+      - ./tmdb_5000_credits.csv:/app/tmdb_5000_credits.csv:ro
+      - ./models:/app/models
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
