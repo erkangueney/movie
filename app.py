@@ -1079,6 +1079,7 @@ st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
 pred_c1, pred_c2 = st.columns([1, 1])
 
 with pred_c1:
+<<<<<<< HEAD
     st.markdown("<div class='sub-header'><i class='fa-solid fa-sliders'></i> FİLM PARAMETRELERİ</div>", unsafe_allow_html=True)
     u_budget  = st.number_input("Yapım Bütçesi ($)", min_value=100_000, max_value=500_000_000, value=80_000_000, step=1_000_000)
     u_runtime = st.slider("Film Süresi (Dakika)", 60, 220, 115)
@@ -1089,16 +1090,36 @@ with pred_c1:
     # Tür seçimi
     all_genres = sorted(df.explode('genres_list')['genres_list'].dropna().unique().tolist())
     u_genres  = st.multiselect("Film Türü (birden fazla seçilebilir)", all_genres, default=['Action', 'Adventure'])
+=======
+    st.markdown("<div class='sub-header'>📝 FİLM PARAMETRELERİ</div>", unsafe_allow_html=True)
+    u_budget  = st.number_input("💰 Yapım Bütçesi ($)", min_value=100_000, max_value=500_000_000, value=80_000_000, step=1_000_000)
+    u_runtime = st.slider("⏱️ Film Süresi (Dakika)", 60, 220, 115)
+    u_pop     = st.slider("🔥 Hedef Popülarite Skoru", 0, 500, 80)
+    u_vote    = st.number_input("🗳️ Beklenen Oy Sayısı", min_value=100, max_value=20000, value=2000, step=100)
+    u_score   = st.slider("⭐ Beklenen IMDB Puanı", 1.0, 10.0, 7.0, 0.1)
+
+    # Tür seçimi
+    all_genres = sorted(df.explode('genres_list')['genres_list'].dropna().unique().tolist())
+    u_genres  = st.multiselect("🎭 Film Türü (birden fazla seçilebilir)", all_genres, default=['Action', 'Adventure'])
+>>>>>>> 032531a7488ec4a2972bf817a466cd83dd252402
 
     # Yönetmen seçimi
     top_directors = df.groupby('director').agg(film_count=('title','count'), avg_roi=('roi','mean')).reset_index()
     top_directors = top_directors[top_directors['film_count'] >= 2].nlargest(200, 'film_count')['director'].tolist()
+<<<<<<< HEAD
     u_director = st.selectbox("Yönetmen", ['Bilinmiyor'] + top_directors)
+=======
+    u_director = st.selectbox("🎬 Yönetmen", ['Bilinmiyor'] + top_directors)
+>>>>>>> 032531a7488ec4a2972bf817a466cd83dd252402
 
     # Başrol oyuncusu seçimi
     top_actors = df.explode('cast_list').groupby('cast_list').agg(film_count=('title','count'), avg_rev=('revenue','mean')).reset_index()
     top_actors = top_actors[top_actors['film_count'] >= 3].nlargest(200, 'avg_rev')['cast_list'].tolist()
+<<<<<<< HEAD
     u_actor = st.selectbox("Başrol Oyuncusu", ['Bilinmiyor'] + top_actors)
+=======
+    u_actor = st.selectbox("🌟 Başrol Oyuncusu", ['Bilinmiyor'] + top_actors)
+>>>>>>> 032531a7488ec4a2972bf817a466cd83dd252402
     
     predict_btn = st.button("ANALİZİ BAŞLAT")
 
