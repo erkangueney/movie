@@ -1442,8 +1442,8 @@ if free_btn and free_query:
 st.markdown('</div>', unsafe_allow_html=True)
 
             
-            # Fetch detailed data
-            detail_res = requests.get(
+# Fetch detailed data
+detail_res = requests.get(
                 f"{BASE_URL}/movie/{movie_id}?api_key={API_KEY}&language=tr-TR&append_to_response=credits",
                 timeout=8
             ).json()
