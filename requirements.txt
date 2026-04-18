@@ -4,7 +4,6 @@ pandas
 numpy
 scikit-learn
 plotly
-xgboost
 statsmodels
 requests
 

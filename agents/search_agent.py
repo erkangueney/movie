@@ -12,6 +12,13 @@ import requests
 from typing import Optional
 
 TMDB_KEY = "9dff4a1400db6ba14b347ce0f29b33a8"
+try:
+    import streamlit as st
+    if "TMDB_API_KEY" in st.secrets:
+        TMDB_KEY = st.secrets["TMDB_API_KEY"]
+except Exception:
+    pass
+
 BASE_URL  = "https://api.themoviedb.org/3"
 POSTER    = "https://image.tmdb.org/t/p/w500"
 

@@ -379,6 +379,12 @@ header, #MainMenu, footer {{ visibility: hidden; }}
 # 2. CONSTANTS
 # ─────────────────────────────────────────────
 API_KEY   = "9dff4a1400db6ba14b347ce0f29b33a8"
+try:
+    if "TMDB_API_KEY" in st.secrets:
+        API_KEY = st.secrets["TMDB_API_KEY"]
+except Exception:
+    pass
+
 BASE_URL  = "https://api.themoviedb.org/3"
 POSTER_URL = "https://image.tmdb.org/t/p/w500"
 
@@ -416,8 +422,11 @@ def prefetch_images(queries_dict, doc_type="movie"):
 # ─────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    m = pd.read_csv('tmdb_5000_movies.csv')
-    c = pd.read_csv('tmdb_5000_credits.csv')
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    movie_path = os.path.join(base_dir, 'tmdb_5000_movies.csv')
+    credit_path = os.path.join(base_dir, 'tmdb_5000_credits.csv')
+    m = pd.read_csv(movie_path)
+    c = pd.read_csv(credit_path)
     df = m.merge(c, on='title')
     df = df[(df['budget'] > 0) & (df['revenue'] > 0)].reset_index(drop=True)
 
