@@ -417,6 +417,82 @@ def prefetch_images(queries_dict, doc_type="movie"):
             results[q] = future.result()
     return results
 
+# ── TMDB Zengin Detay Fonksiyonları ─────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_tmdb_movie_detail(title):
+    """Film için zengin bilgi çeker: yıl, gişe, bütçe, IMDB puanı, yönetmen, oyuncular."""
+    try:
+        res = requests.get(f"{BASE_URL}/search/movie",
+            params={"api_key": API_KEY, "query": title, "language": "tr-TR"}, timeout=4).json()
+        if not res.get('results'):
+            return None
+        m = res['results'][0]
+        mid = m['id']
+        det = requests.get(f"{BASE_URL}/movie/{mid}",
+            params={"api_key": API_KEY, "language": "tr-TR", "append_to_response": "credits"},
+            timeout=4).json()
+        crew = det.get('credits', {}).get('crew', [])
+        cast = det.get('credits', {}).get('cast', [])
+        pp = m.get('poster_path') or det.get('poster_path')
+        return {
+            'title': m.get('title', title),
+            'year': str(m.get('release_date', ''))[:4],
+            'vote_average': m.get('vote_average', 0),
+            'vote_count': m.get('vote_count', 0),
+            'budget': det.get('budget', 0),
+            'revenue': det.get('revenue', 0),
+            'runtime': det.get('runtime', 0),
+            'genres': [g['name'] for g in det.get('genres', [])],
+            'directors': [p['name'] for p in crew if p.get('job') == 'Director'][:2],
+            'cast': [p['name'] for p in cast[:3]],
+            'poster_url': (POSTER_URL + pp) if pp else None,
+        }
+    except:
+        return None
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_tmdb_person_detail(name):
+    """Kişi (yönetmen/oyuncu) için en bilinen yapımlarını çeker."""
+    try:
+        res = requests.get(f"{BASE_URL}/search/person",
+            params={"api_key": API_KEY, "query": name, "language": "tr-TR"}, timeout=4).json()
+        if not res.get('results'):
+            return None
+        p = res['results'][0]
+        known = p.get('known_for', [])
+        top_works = []
+        for w in known[:3]:
+            t = w.get('title') or w.get('name', '')
+            y = str(w.get('release_date', w.get('first_air_date', '')))[:4]
+            va = w.get('vote_average', 0)
+            if t:
+                top_works.append({'title': t, 'year': y, 'vote': va})
+        pp = p.get('profile_path')
+        return {
+            'name': p.get('name', name),
+            'known_for_department': p.get('known_for_department', ''),
+            'popularity': p.get('popularity', 0),
+            'top_works': top_works,
+            'photo_url': (POSTER_URL + pp) if pp else None,
+        }
+    except:
+        return None
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def search_tmdb_people(query, department=None):
+    """TMDB'den kişi arar, opsiyonel departman filtresi ile (Directing/Acting)."""
+    try:
+        res = requests.get(f"{BASE_URL}/search/person",
+            params={"api_key": API_KEY, "query": query, "language": "tr-TR"}, timeout=4).json()
+        people = []
+        for p in res.get('results', [])[:10]:
+            if department and p.get('known_for_department', '') != department:
+                continue
+            people.append(p.get('name', ''))
+        return people
+    except:
+        return []
+
 # ─────────────────────────────────────────────
 # 3. DATA LOADING
 # ─────────────────────────────────────────────
@@ -753,25 +829,45 @@ def render_top10(data, val_col, val_format, label, color):
         else:
             val_str = val_format % val
         img_url = img_dict.get(row['title'], '')
+        # Zengin tooltip bilgisi — dataset'ten
+        year_str = str(row.get('release_date',''))[:4]
+        vote_avg = row.get('vote_average', 0)
+        vote_cnt = row.get('vote_count', 0)
+        budget_v = row.get('budget', 0)
+        revenue_v = row.get('revenue', 0)
+        roi_v = revenue_v / budget_v if budget_v > 0 else 0
+        genres_str = ', '.join(row.get('genres_list', [])[:3]) if 'genres_list' in row.index else ''
+        director_n = row.get('director', '—')
+        cast_str = ', '.join(row.get('cast_list', [])[:3]) if 'cast_list' in row.index else ''
         html += f"""
         <div class="top10-row tooltip-container" style="border-color:{colors[rank-1]}">
-          <div class="tooltip-content">
+          <div class="tooltip-content" style="text-align:left;min-width:260px">
             <img src="{img_url}" width="100%">
             <div class="tooltip-title">{row['title']}</div>
-            <div class="tooltip-sub">🎬 {row.get('director','—')}</div>
+            <div style="font-size:11px;margin:6px 0;display:grid;grid-template-columns:1fr 1fr;gap:4px">
+              <span>📅 {year_str}</span>
+              <span>⭐ {vote_avg:.1f}/10</span>
+              <span>💰 ${budget_v/1e6:.0f}M</span>
+              <span>💵 ${revenue_v/1e6:.0f}M</span>
+              <span>📈 ROI x{roi_v:.1f}</span>
+              <span>🗳️ {vote_cnt:,.0f} oy</span>
+            </div>
+            <div style="font-size:11px;opacity:0.8">🎭 {genres_str}</div>
+            <div style="font-size:11px;opacity:0.8;margin-top:2px">🎬 {director_n}</div>
+            <div style="font-size:11px;opacity:0.7;margin-top:2px">🌟 {cast_str}</div>
           </div>
           <div class="top10-rank" style="color:{colors[rank-1]}">#{rank}</div>
           <img src="{img_url}" class="avatar-img">
           <div class="top10-info">
             <div class="top10-title">{row['title']}</div>
-            <div class="top10-sub">{row.get('director','—')} • {str(row.get('release_date',''))[:4]}</div>
+            <div class="top10-sub">{director_n} • {year_str}</div>
           </div>
           <div class="top10-val" style="color:{color}">{val_str}</div>
         </div>"""
     st.markdown(html, unsafe_allow_html=True)
 
 with top10_tab1:
-    top_rev = df.nlargest(10, 'revenue')[['title','revenue','director','release_date']]
+    top_rev = df.nlargest(10, 'revenue')
     render_top10(top_rev, 'revenue', '$%.0fM', 'Gişe', '#00f3ff')
     # make revenue in millions for display
     top_rev_disp = df.nlargest(10, 'revenue').copy()
@@ -784,27 +880,38 @@ with top10_tab1:
     st.plotly_chart(fig_t1, use_container_width=True)
 
 with top10_tab2:
-    top_roi = df[df['roi'] < 200].nlargest(10, 'roi')[['title','roi','director','release_date','budget']]
-    for _, row in top_roi.iterrows():
-        pass  # just use render_top10
+    top_roi = df[df['roi'] < 200].nlargest(10, 'roi')
+    colors2 = ['#ffd700','#c0c0c0','#cd7f32'] + ['#00ff88'] * 7
     html_roi = ""
     queries = {row['title']: row['title'] for _, row in top_roi.iterrows()}
     img_dict = prefetch_images(queries, "movie")
-    colors2 = ['#ffd700','#c0c0c0','#cd7f32'] + ['#00ff88'] * 7
     for rank, (_, row) in enumerate(top_roi.iterrows(), 1):
         img_url = img_dict.get(row['title'], '')
+        year_str = str(row.get('release_date',''))[:4]
+        vote_avg = row.get('vote_average', 0)
+        budget_v = row.get('budget', 0)
+        revenue_v = row.get('revenue', 0)
+        genres_str = ', '.join(row.get('genres_list', [])[:3]) if 'genres_list' in row.index else ''
+        cast_str = ', '.join(row.get('cast_list', [])[:3]) if 'cast_list' in row.index else ''
         html_roi += f"""
         <div class="top10-row tooltip-container" style="border-color:{colors2[rank-1]}">
-          <div class="tooltip-content">
+          <div class="tooltip-content" style="text-align:left;min-width:260px">
             <img src="{img_url}" width="100%">
             <div class="tooltip-title">{row['title']}</div>
-            <div class="tooltip-sub">🎬 {row.get('director','—')}</div>
+            <div style="font-size:11px;margin:6px 0;display:grid;grid-template-columns:1fr 1fr;gap:4px">
+              <span>📅 {year_str}</span><span>⭐ {vote_avg:.1f}/10</span>
+              <span>💰 ${budget_v/1e6:.0f}M</span><span>💵 ${revenue_v/1e6:.0f}M</span>
+              <span>📈 ROI x{row['roi']:.1f}</span>
+            </div>
+            <div style="font-size:11px;opacity:0.8">🎭 {genres_str}</div>
+            <div style="font-size:11px;opacity:0.8;margin-top:2px">🎬 {row.get('director','—')}</div>
+            <div style="font-size:11px;opacity:0.7;margin-top:2px">🌟 {cast_str}</div>
           </div>
           <div class="top10-rank" style="color:{colors2[rank-1]}">#{rank}</div>
           <img src="{img_url}" class="avatar-img">
           <div class="top10-info">
             <div class="top10-title">{row['title']}</div>
-            <div class="top10-sub">{row.get('director','—')} • Bütçe: ${row['budget']/1e6:.1f}M</div>
+            <div class="top10-sub">{row.get('director','—')} • Bütçe: ${budget_v/1e6:.1f}M</div>
           </div>
           <div class="top10-val" style="color:#00ff88">x{row['roi']:.1f}</div>
         </div>"""
@@ -818,19 +925,32 @@ with top10_tab2:
     st.plotly_chart(fig_t2, use_container_width=True)
 
 with top10_tab3:
-    top_score = df[df['vote_count'] > 500].nlargest(10, 'vote_average')[['title','vote_average','director','release_date','vote_count']]
+    top_score = df[df['vote_count'] > 500].nlargest(10, 'vote_average')
     html_sc = ""
     queries = {row['title']: row['title'] for _, row in top_score.iterrows()}
     img_dict = prefetch_images(queries, "movie")
     for rank, (_, row) in enumerate(top_score.iterrows(), 1):
         c = colors2[rank-1]
         img_url = img_dict.get(row['title'], '')
+        year_str = str(row.get('release_date',''))[:4]
+        budget_v = row.get('budget', 0)
+        revenue_v = row.get('revenue', 0)
+        roi_v = revenue_v / budget_v if budget_v > 0 else 0
+        genres_str = ', '.join(row.get('genres_list', [])[:3]) if 'genres_list' in row.index else ''
+        cast_str = ', '.join(row.get('cast_list', [])[:3]) if 'cast_list' in row.index else ''
         html_sc += f"""
         <div class="top10-row tooltip-container" style="border-color:{c}">
-          <div class="tooltip-content">
+          <div class="tooltip-content" style="text-align:left;min-width:260px">
             <img src="{img_url}" width="100%">
             <div class="tooltip-title">{row['title']}</div>
-            <div class="tooltip-sub">🎬 {row.get('director','—')}</div>
+            <div style="font-size:11px;margin:6px 0;display:grid;grid-template-columns:1fr 1fr;gap:4px">
+              <span>📅 {year_str}</span><span>⭐ {row['vote_average']:.1f}/10</span>
+              <span>💰 ${budget_v/1e6:.0f}M</span><span>💵 ${revenue_v/1e6:.0f}M</span>
+              <span>📈 ROI x{roi_v:.1f}</span><span>🗳️ {row['vote_count']:,.0f} oy</span>
+            </div>
+            <div style="font-size:11px;opacity:0.8">🎭 {genres_str}</div>
+            <div style="font-size:11px;opacity:0.8;margin-top:2px">🎬 {row.get('director','—')}</div>
+            <div style="font-size:11px;opacity:0.7;margin-top:2px">🌟 {cast_str}</div>
           </div>
           <div class="top10-rank" style="color:{c}">#{rank}</div>
           <img src="{img_url}" class="avatar-img">
@@ -849,25 +969,39 @@ with top10_tab3:
     st.plotly_chart(fig_t3, use_container_width=True)
 
 with top10_tab4:
-    top_profit = df.nlargest(10, 'profit')[['title','profit','budget','revenue','director','release_date']]
+    top_profit = df.nlargest(10, 'profit')
     html_pr = ""
     queries = {row['title']: row['title'] for _, row in top_profit.iterrows()}
     img_dict = prefetch_images(queries, "movie")
     for rank, (_, row) in enumerate(top_profit.iterrows(), 1):
         c = colors2[rank-1]
         img_url = img_dict.get(row['title'], '')
+        year_str = str(row.get('release_date',''))[:4]
+        vote_avg = row.get('vote_average', 0)
+        budget_v = row.get('budget', 0)
+        revenue_v = row.get('revenue', 0)
+        roi_v = revenue_v / budget_v if budget_v > 0 else 0
+        genres_str = ', '.join(row.get('genres_list', [])[:3]) if 'genres_list' in row.index else ''
+        cast_str = ', '.join(row.get('cast_list', [])[:3]) if 'cast_list' in row.index else ''
         html_pr += f"""
         <div class="top10-row tooltip-container" style="border-color:{c}">
-          <div class="tooltip-content">
+          <div class="tooltip-content" style="text-align:left;min-width:260px">
             <img src="{img_url}" width="100%">
             <div class="tooltip-title">{row['title']}</div>
-            <div class="tooltip-sub">🎬 {row.get('director','—')}</div>
+            <div style="font-size:11px;margin:6px 0;display:grid;grid-template-columns:1fr 1fr;gap:4px">
+              <span>📅 {year_str}</span><span>⭐ {vote_avg:.1f}/10</span>
+              <span>💰 ${budget_v/1e6:.0f}M</span><span>💵 ${revenue_v/1e6:.0f}M</span>
+              <span>📈 ROI x{roi_v:.1f}</span><span>💼 Kâr: ${row['profit']/1e6:.0f}M</span>
+            </div>
+            <div style="font-size:11px;opacity:0.8">🎭 {genres_str}</div>
+            <div style="font-size:11px;opacity:0.8;margin-top:2px">🎬 {row.get('director','—')}</div>
+            <div style="font-size:11px;opacity:0.7;margin-top:2px">🌟 {cast_str}</div>
           </div>
           <div class="top10-rank" style="color:{c}">#{rank}</div>
           <img src="{img_url}" class="avatar-img">
           <div class="top10-info">
             <div class="top10-title">{row['title']}</div>
-            <div class="top10-sub">{row.get('director','—')} • Bütçe: ${row['budget']/1e6:.0f}M</div>
+            <div class="top10-sub">{row.get('director','—')} • Bütçe: ${budget_v/1e6:.0f}M</div>
           </div>
           <div class="top10-val" style="color:#ff6b35">${row['profit']/1e6:.0f}M</div>
         </div>"""
@@ -956,12 +1090,24 @@ with people_tab1:
             else:
                 val_str = f"⭐{row['avg_score']:.2f}"
             img_url = img_dict.get(row['director'], '')
+            # Yönetmenin en başarılı 3 filmini bul
+            dir_films = df[df['director'] == row['director']].nlargest(3, 'revenue')
+            top_films_html = ""
+            for _, frow in dir_films.iterrows():
+                top_films_html += f"<div style='font-size:10px;opacity:0.8;margin:1px 0'>🎬 {frow['title']} (${frow['revenue']/1e6:.0f}M)</div>"
             html_dirs += f"""
             <div class="top10-row tooltip-container" style="border-color:{c[rank-1]}">
-              <div class="tooltip-content">
+              <div class="tooltip-content" style="text-align:left;min-width:280px">
                 <img src="{img_url}" width="100%">
                 <div class="tooltip-title">{row['director']}</div>
-                <div class="tooltip-sub">🎬 Yönetmen</div>
+                <div style="font-size:11px;margin:6px 0;display:grid;grid-template-columns:1fr 1fr;gap:4px">
+                  <span>🎞️ {row['film_count']} Film</span>
+                  <span>⭐ {row['avg_score']:.1f}/10</span>
+                  <span>💰 ${row['total_rev']/1e6:.0f}M Toplam</span>
+                  <span>📈 ROI x{row['avg_roi']:.1f}</span>
+                </div>
+                <div style="font-size:10px;color:#ffd700;margin-top:4px;font-weight:700">🏆 En Başarılı Yapımlar:</div>
+                {top_films_html}
               </div>
               <div class="top10-rank" style="color:{c[rank-1]};font-size:14px">#{rank}</div>
               <img src="{img_url}" class="avatar-img">
@@ -1040,12 +1186,24 @@ with people_tab2:
             else:
                 val_str = f"⭐{row['avg_score']:.2f}"
             img_url = img_dict.get(row['actor'], '')
+            # Oyuncunun en başarılı 3 filmini bul
+            act_films = df[df['cast_list'].apply(lambda cl: row['actor'] in cl)].nlargest(3, 'revenue')
+            top_films_html = ""
+            for _, frow in act_films.iterrows():
+                top_films_html += f"<div style='font-size:10px;opacity:0.8;margin:1px 0'>🎬 {frow['title']} (${frow['revenue']/1e6:.0f}M)</div>"
             html_acts += f"""
             <div class="top10-row tooltip-container" style="border-color:{c[rank-1]}">
-              <div class="tooltip-content">
+              <div class="tooltip-content" style="text-align:left;min-width:280px">
                 <img src="{img_url}" width="100%">
                 <div class="tooltip-title">{row['actor']}</div>
-                <div class="tooltip-sub">🌟 Oyuncu</div>
+                <div style="font-size:11px;margin:6px 0;display:grid;grid-template-columns:1fr 1fr;gap:4px">
+                  <span>🎞️ {row['film_count']} Film</span>
+                  <span>⭐ {row['avg_score']:.1f}/10</span>
+                  <span>💰 ${row['total_rev']/1e6:.0f}M Toplam</span>
+                  <span>📈 ROI x{row['avg_roi']:.1f}</span>
+                </div>
+                <div style="font-size:10px;color:#ffd700;margin-top:4px;font-weight:700">🏆 En Başarılı Yapımlar:</div>
+                {top_films_html}
               </div>
               <div class="top10-rank" style="color:{c[rank-1]};font-size:14px">#{rank}</div>
               <img src="{img_url}" class="avatar-img">
@@ -1099,14 +1257,29 @@ with pred_c1:
     all_genres = sorted(df.explode('genres_list')['genres_list'].dropna().unique().tolist())
     u_genres  = st.multiselect("Film Türü (birden fazla seçilebilir)", all_genres, default=['Action', 'Adventure'])
 
-    # Yönetmen seçimi
+    # Yönetmen seçimi — Dataset + TMDB API
     top_directors = df.groupby('director').agg(film_count=('title','count'), avg_roi=('roi','mean')).reset_index()
     top_directors = top_directors[top_directors['film_count'] >= 2].nlargest(200, 'film_count')['director'].tolist()
+    
+    tmdb_dir_search = st.text_input("🔍 Yönetmen Ara (TMDB)", placeholder="Ör: Denis Villeneuve, Ridley Scott...", key="tmdb_dir_search")
+    if tmdb_dir_search and len(tmdb_dir_search) >= 2:
+        tmdb_dir_results = search_tmdb_people(tmdb_dir_search, department="Directing")
+        # Dataset'te olmayan yönetmenleri ekle
+        for d in tmdb_dir_results:
+            if d and d not in top_directors:
+                top_directors.insert(0, d)
     u_director = st.selectbox("Yönetmen", ['Bilinmiyor'] + top_directors)
 
-    # Başrol oyuncusu seçimi
+    # Başrol oyuncusu seçimi — Dataset + TMDB API
     top_actors = df.explode('cast_list').groupby('cast_list').agg(film_count=('title','count'), avg_rev=('revenue','mean')).reset_index()
     top_actors = top_actors[top_actors['film_count'] >= 3].nlargest(200, 'avg_rev')['cast_list'].tolist()
+    
+    tmdb_act_search = st.text_input("🔍 Oyuncu Ara (TMDB)", placeholder="Ör: Timothée Chalamet, Margot Robbie...", key="tmdb_act_search")
+    if tmdb_act_search and len(tmdb_act_search) >= 2:
+        tmdb_act_results = search_tmdb_people(tmdb_act_search, department="Acting")
+        for a in tmdb_act_results:
+            if a and a not in top_actors:
+                top_actors.insert(0, a)
     u_actor = st.selectbox("Başrol Oyuncusu", ['Bilinmiyor'] + top_actors)
     
     predict_btn = st.button("ANALİZİ BAŞLAT")
@@ -1204,34 +1377,8 @@ st.markdown('</div>', unsafe_allow_html=True)
 # ═══════════════════════════════════════════════════════
 st.markdown('<span id="live-ai" class="section-anchor"></span>', unsafe_allow_html=True)
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-st.markdown("<div class='section-title cyan'><i class='fa-solid fa-magnifying-glass-chart'></i> CANLI AI ANALİZ — AGENTIC SİSTEM", unsafe_allow_html=True)
-
-# ── Agent Durum Göstergesi ──────────────────────────────────────────────────
-if AGENTS_AVAILABLE:
-    st.markdown("""
-    <div style='text-align:center;margin-bottom:8px'>
-      <span style='background:rgba(0,255,136,0.1);border:1px solid rgba(0,255,136,0.4);
-      padding:4px 14px;border-radius:20px;font-size:11px;letter-spacing:1px;color:#00ff88'>
-        🟢 LangGraph Agent Aktif
-      </span>
-      &nbsp;
-      <span style='background:rgba(0,243,255,0.1);border:1px solid rgba(0,243,255,0.3);
-      padding:4px 14px;border-radius:20px;font-size:11px;letter-spacing:1px;color:#00f3ff'>
-        📋 system_prompt.md Yüklendi
-      </span>
-    </div>
-    """, unsafe_allow_html=True)
-else:
-    st.markdown("""
-    <div style='text-align:center;margin-bottom:8px'>
-      <span style='background:rgba(255,136,0,0.1);border:1px solid rgba(255,136,0,0.4);
-      padding:4px 14px;border-radius:20px;font-size:11px;letter-spacing:1px;color:#ff8800'>
-        ⚠ agents/ klasörü bulunamadı — Klasik mod aktif
-      </span>
-    </div>
-    """, unsafe_allow_html=True)
-
-st.markdown("<p style='text-align:center;opacity:0.5;font-size:12px;letter-spacing:1px'>Film adı girin: search_agent → prediction_agent → sonuç</p>", unsafe_allow_html=True)
+st.markdown("<div class='section-title cyan'><i class='fa-solid fa-magnifying-glass-chart'></i> CANLI AI FİLM ANALİZİ</div>", unsafe_allow_html=True)
+st.markdown("<p style='text-align:center;opacity:0.5;font-size:12px;letter-spacing:1px'>Herhangi bir filmi arayın — AI modelimiz gişe tahmini ve başarı analizi sunsun</p>", unsafe_allow_html=True)
 st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
 
 ai_tab1, ai_tab2 = st.tabs(["🔍 Film Analizi", "💬 Serbest Sorgu"])
@@ -1274,7 +1421,7 @@ if AGENTS_AVAILABLE:
 if search_btn and search_query:
     if AGENTS_AVAILABLE:
         # ── LangGraph Agent Akışı ──────────────────────────────────────────
-        with st.spinner("🔍 search_agent → 🤖 prediction_agent çalışıyor..."):
+        with st.spinner("🔍 Film aranıyor ve analiz ediliyor..."):
             # 1. Search Agent
             search_result = search_movie(search_query)
 
@@ -1316,7 +1463,7 @@ if search_btn and search_query:
 
             # 3. Prediction Agent
             st.markdown('<div class="neon-divider"></div>', unsafe_allow_html=True)
-            with st.spinner("🤖 prediction_agent hesaplıyor..."):
+            with st.spinner("🤖 Gişe tahmini hesaplanıyor..."):
                 pred = predict_movie(
                     movie_data=search_result,
                     df=df,
@@ -1402,13 +1549,7 @@ if search_btn and search_query:
                 </div>
                 """, unsafe_allow_html=True)
 
-            # Agent akış özeti
-            st.markdown(f"""
-            <div style='margin-top:12px;background:rgba(0,0,0,0.15);border-radius:8px;padding:10px;
-            font-size:10px;opacity:0.5;text-align:center'>
-              📋 system_prompt.md okundu → 🔍 search_agent (TMDB API) → 🤖 prediction_agent (ML) → ✅ Yanıt
-            </div>
-            """, unsafe_allow_html=True)
+
 
     else:
         # ── Klasik mod (agents/ yoksa) ─────────────────────────────────────
